@@ -6,10 +6,6 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~> 3.0"
     }
-    docker = {
-      source  = "kreuzwerker/docker"
-      version = "~> 3.0"
-    }
     random = {
       source  = "hashicorp/random"
       version = "~> 3.6"
@@ -30,9 +26,9 @@ resource "random_string" "acr_suffix" {
   numeric = true
   special = false
 }
+
 locals {
   acr_basename = replace(var.project_name, "-", "") // only letters/numbers
-  // keep base to <= 40 so base+6 <= 46 (under 50 char limit)
   acr_name     = "${substr(local.acr_basename, 0, 40)}${random_string.acr_suffix.result}"
 }
 
@@ -53,33 +49,6 @@ resource "azurerm_container_registry" "acr" {
     environment = terraform.workspace
     project     = var.project_name
   }
-}
-
-# Configure Docker provider to use ACR
-provider "docker" {
-  registry_auth {
-    address  = azurerm_container_registry.acr.login_server
-    username = azurerm_container_registry.acr.admin_username
-    password = azurerm_container_registry.acr.admin_password
-  }
-}
-
-# Build and push Docker image
-resource "docker_image" "app" {
-  name = "${azurerm_container_registry.acr.login_server}/${var.project_name}:${var.docker_image_tag}"
-  
-  build {
-    context    = "${path.module}/../.."
-    dockerfile = "Dockerfile"
-    platform   = "linux/amd64"
-    no_cache   = true
-  }
-}
-
-resource "docker_registry_image" "app" {
-  name = docker_image.app.name
-  
-  depends_on = [docker_image.app]
 }
 
 # Create Log Analytics Workspace for monitoring
@@ -119,9 +88,14 @@ resource "azurerm_container_app" "main" {
   template {
     container {
       name   = "main"
-      image  = docker_registry_image.app.name
+      image  = "${azurerm_container_registry.acr.login_server}/${var.project_name}:${var.docker_image_tag}"
       cpu    = 1.0
       memory = "2.0Gi"
+
+      env {
+        name  = "GEMINI_API_KEY"
+        value = var.openai_api_key
+      }
 
       env {
         name  = "OPENAI_API_KEY"
@@ -137,7 +111,6 @@ resource "azurerm_container_app" "main" {
         name  = "ENVIRONMENT"
         value = "production"
       }
-
 
       env {
         name  = "PYTHONUNBUFFERED"
@@ -160,8 +133,8 @@ resource "azurerm_container_app" "main" {
   }
 
   registry {
-    server   = azurerm_container_registry.acr.login_server
-    username = azurerm_container_registry.acr.admin_username
+    server               = azurerm_container_registry.acr.login_server
+    username             = azurerm_container_registry.acr.admin_username
     password_secret_name = "registry-password"
   }
 
@@ -174,6 +147,10 @@ resource "azurerm_container_app" "main" {
     environment = terraform.workspace
     project     = var.project_name
   }
+
+  depends_on = [
+    azurerm_container_registry.acr
+  ]
 }
 
 # Outputs
